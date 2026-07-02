@@ -13586,11 +13586,28 @@ function shouldSyncCloudImages(manual){
   const last=parseInt(localStorage.getItem('crmLastCloudImageSyncAt')||'0')||0;
   return !last||Date.now()-last>15*60*1000;
 }
+// Apps Script /exec no responde con CORS legible via fetch normal (por eso fetchCloudBackupData
+// ya usaba JSONP como primera opcion). Las acciones de imagenes necesitan el mismo truco.
+function cloudJsonp(baseUrl,params={},timeoutMs=12000){
+  return new Promise((resolve,reject)=>{
+    const cb='hisenseCrmCloudJsonp_'+Date.now()+'_'+Math.random().toString(36).slice(2);
+    const script=document.createElement('script');
+    const done=(err,data)=>{
+      clearTimeout(timer);
+      try{delete window[cb]}catch(e){window[cb]=undefined}
+      script.remove();
+      err?reject(err):resolve(data);
+    };
+    const timer=setTimeout(()=>done(new Error('Tiempo agotado leyendo la nube')),timeoutMs);
+    window[cb]=data=>done(null,data);
+    script.onerror=()=>done(new Error('No pude leer la nube por JSONP'));
+    script.src=cloudUrlWithParams(baseUrl,{...params,callback:cb,_t:Date.now()});
+    document.head.appendChild(script);
+  });
+}
 async function fetchCloudImageList(url){
   try{
-    const res=await fetchWithTimeout(cloudUrlWithParams(url,{action:'listImages',_t:Date.now()}),{cache:'no-store'},8000);
-    if(!res.ok)return null;
-    const data=JSON.parse(await res.text());
+    const data=await cloudJsonp(url,{action:'listImages'},8000);
     if(!data?.ok||!Array.isArray(data.files))return null;
     const map={};data.files.forEach(f=>{if(f?.name)map[f.name]=f.size||0});
     return map;
@@ -14189,9 +14206,7 @@ function backupLooksEmptyOrSeedOnly(data){
 }
 async function fetchCloudImageBase64(url,base){
   try{
-    const res=await fetchWithTimeout(cloudUrlWithParams(url,{action:'getImage',base,_t:Date.now()}),{cache:'no-store'},10000);
-    if(!res.ok)return'';
-    const data=JSON.parse(await res.text());
+    const data=await cloudJsonp(url,{action:'getImage',base},10000);
     if(!data?.ok||!data.base64)return'';
     return`data:${data.mime||'application/octet-stream'};base64,${data.base64}`;
   }catch(e){console.warn('fetchCloudImageBase64:',base,e);return''}
