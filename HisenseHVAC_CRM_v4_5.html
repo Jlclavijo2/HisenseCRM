@@ -554,6 +554,11 @@ function showApp(opts={}){
   buildNav();loadTRM();render();
   startProjectReminderMonitor();
   setTimeout(()=>autoPullConfiguredBackup().catch(e=>console.warn('auto cloud sync:',e)),2500);
+  // Revisa la nube cada cierto tiempo mientras la app esta abierta, para que los cambios
+  // hechos en otro dispositivo (ej. un usuario nuevo) lleguen sin tener que recargar o
+  // sincronizar a mano. No es tiempo real, pero acorta el retraso a minutos.
+  if(autoPullIntervalId)clearInterval(autoPullIntervalId);
+  autoPullIntervalId=setInterval(()=>autoPullConfiguredBackup().catch(e=>console.warn('auto cloud sync interval:',e)),AUTO_PULL_INTERVAL_MS);
   setTimeout(()=>addChatMsg('bot',`¡Hola ${CU.name.split(' ')[0]}! 👋 Soy tu asistente Hisense. Puedes preguntarme cómo usar cualquier módulo del CRM.`),1200);
   // Escuchar guardados de cotizaciones desde otras pestañas
   window.addEventListener('storage',e=>{
@@ -562,7 +567,7 @@ function showApp(opts={}){
     }
   });
 }
-function doLogout(){try{sessionStorage.removeItem('crm_user');}catch(e){}trustedDeviceClear();CU=null;document.getElementById('loginScreen').classList.add('active');document.getElementById('mainApp').style.display='none'}
+function doLogout(){try{sessionStorage.removeItem('crm_user');}catch(e){}trustedDeviceClear();CU=null;if(autoPullIntervalId){clearInterval(autoPullIntervalId);autoPullIntervalId=null}document.getElementById('loginScreen').classList.add('active');document.getElementById('mainApp').style.display='none'}
 function canDo(v){return canView(v)}
 function requireEdit(v=V.view){if(canEdit(v))return true;toast('Permiso solo visualizacion','tdg2');return false}
 
@@ -13212,6 +13217,8 @@ function scheduleAutoBackup(store='',action=''){
   backupTimer=setTimeout(()=>{backupTimer=null;backupTimerAt=0;performAutoBackup(false,{reason:`${store}:${action}`}).catch(e=>console.warn('auto backup:',e))},delay);
 }
 const CLOUD_SYNC_ENABLED = true;
+let autoPullIntervalId=null;
+const AUTO_PULL_INTERVAL_MS=90*1000;
 const CLOUD_SYNC_URL = ['https://script.google.com/macros/s/','AKfycbybACrYB0hf197GP3MeMTin3zSWN6fCnF1YCgy1moD6P37FnTAuYrjx-5BaKsfLyGhZ','/exec'].join('');
 
 function getSyncConfig(){
