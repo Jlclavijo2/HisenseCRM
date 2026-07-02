@@ -13120,6 +13120,7 @@ async function rSettings(){
       <label class="field" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="syncAutoPull" ${syncCfg.autoPull?'checked':''} style="width:auto"> Sincronizar desde nube al abrir si hay URL de lectura</label>
       <div class="flex gap12 fw">
         <button class="btn bp" onclick="saveSyncConfig()">Guardar y probar backup</button>
+        <button class="btn bs" onclick="pullFromAppsScriptNow()">📥 Sincronizar ahora (Apps Script)</button>
         <button class="btn bs" onclick="diagnoseCloudBackup()">Diagnostico nube</button>
         <button class="btn bs" onclick="copyGoogleBackupScript()">Copiar script Google Drive</button>
         <button class="btn bs" onclick="downloadWebApp()">Descargar app web</button>
@@ -14430,6 +14431,16 @@ async function syncDriveFolderNow(manual=false){
 async function autoPullConfiguredBackup(){
   const cfg=getSyncConfig();if(!cfg.autoPull||!cfg.pullUrl)return;
   try{await pullConfiguredBackup(false)}catch(e){console.warn('pull backup:',e)}
+}
+// Boton manual para jalar del Apps Script /exec (distinto de "Sincronizar ahora", que usa
+// una carpeta de Drive montada localmente). Este si pasa por rehydrateSubmittalImagesFromCloud.
+async function pullFromAppsScriptNow(){
+  const cfg=getSyncConfig();
+  if(!cfg.pullUrl){toast('Configura primero la URL de Apps Script','tdg2');return}
+  try{
+    const ok=await pullConfiguredBackup(true,{force:true});
+    if(!ok)toast('Nada nuevo que traer de Apps Script','tt',4000);
+  }catch(e){toast('Sincronizar Apps Script: '+e.message,'tdg2',7000)}
 }
 function flushBackupOnExit(){
   if(!backupPending())return;
