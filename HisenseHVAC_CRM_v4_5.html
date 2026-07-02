@@ -13581,6 +13581,51 @@ async function verifyCloudBackupWrite(url,expectedStamp,manual=false){
   if(manual)toast('Google Drive no confirmo el backup: '+(lastErr||'sin respuesta valida'),'tdg2',8000);
   return false;
 }
+function shouldSyncCloudImages(manual){
+  if(manual)return true;
+  const last=parseInt(localStorage.getItem('crmLastCloudImageSyncAt')||'0')||0;
+  return !last||Date.now()-last>15*60*1000;
+}
+async function fetchCloudImageList(url){
+  try{
+    const res=await fetchWithTimeout(cloudUrlWithParams(url,{action:'listImages',_t:Date.now()}),{cache:'no-store'},8000);
+    if(!res.ok)return null;
+    const data=JSON.parse(await res.text());
+    if(!data?.ok||!Array.isArray(data.files))return null;
+    const map={};data.files.forEach(f=>{if(f?.name)map[f.name]=f.size||0});
+    return map;
+  }catch(e){console.warn('fetchCloudImageList:',e);return null}
+}
+async function uploadImageToCloud(url,filename,mime,base64){
+  const body=JSON.stringify({_action:'uploadImage',filename,mime,base64});
+  try{
+    await fetchWithTimeout(url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body,redirect:'follow',cache:'no-store',credentials:'omit'},20000);
+    return true;
+  }catch(e){console.warn('uploadImageToCloud:',filename,e);return false}
+}
+// Las imagenes de submittals se suben una por una a /images en Drive (accion uploadImage),
+// separado del JSON principal para no romper el limite de tamano del POST a Apps Script.
+async function pushSubmittalImagesToCloud(url,payload,manual=false){
+  const subs=payload?.stores?.submittals;
+  if(!url||!Array.isArray(subs)||!subs.length)return{uploaded:0,skipped:0,errors:0};
+  if(!shouldSyncCloudImages(manual))return{uploaded:0,skipped:0,errors:0,throttled:true};
+  const existing=await fetchCloudImageList(url)||{};
+  let uploaded=0,skipped=0,errors=0;
+  for(const row of subs){
+    for(const entry of submittalImageEntries(row)){
+      const m=/^data:([^;]+);base64,(.*)$/.exec(entry.data||'');
+      if(!m)continue;
+      const mime=m[1],base64=m[2];
+      const filename=`${entry.base}.${imageExtFromMime(mime)}`;
+      const expectedSize=Math.floor(base64.length*3/4);
+      if(existing[filename]!==undefined&&Math.abs(existing[filename]-expectedSize)<64){skipped++;continue}
+      const ok=await uploadImageToCloud(url,filename,mime,base64);
+      if(ok)uploaded++;else errors++;
+    }
+  }
+  localStorage.setItem('crmLastCloudImageSyncAt',String(Date.now()));
+  return{uploaded,skipped,errors};
+}
 async function postDirectCloudPayload(payload,manual=false){
   const url=getSyncConfig().pushUrl;if(!url)return false;
   // Las imagenes viven en la carpeta local (images/). A la nube solo va el JSON ligero
@@ -13621,6 +13666,8 @@ async function postDirectCloudPayload(payload,manual=false){
     verified=await verifyCloudBackupWrite(url,parseInt(payload?._meta?.updatedAt||'0')||0,manual);
   }
   if(verified&&manual)toast(`Backup confirmado en Google Drive · ${(body.length/1024).toFixed(1)} KB`,'tok2',6000);
+  const imgResult=await pushSubmittalImagesToCloud(url,payload,manual).catch(e=>{console.warn('pushSubmittalImagesToCloud:',e);return{uploaded:0,skipped:0,errors:1}});
+  if(manual&&(imgResult.uploaded||imgResult.errors))toast(`Imagenes submittals: ${imgResult.uploaded} subidas, ${imgResult.skipped} sin cambios${imgResult.errors?` · ${imgResult.errors} con error`:''}`,imgResult.errors&&!imgResult.uploaded?'tw3':'tok2',5500);
   return verified;
 }
 async function postCloudActionPayload(payload,manual=false){
@@ -14140,13 +14187,53 @@ function backupLooksEmptyOrSeedOnly(data){
   const projectsOk=projects.length<=2&&projects.every(p=>demoProjects.has(normSearch(p.name||''))&&(p.createdBy==='Sistema'||!p.createdBy));
   return clientsOk&&projectsOk;
 }
+async function fetchCloudImageBase64(url,base){
+  try{
+    const res=await fetchWithTimeout(cloudUrlWithParams(url,{action:'getImage',base,_t:Date.now()}),{cache:'no-store'},10000);
+    if(!res.ok)return'';
+    const data=JSON.parse(await res.text());
+    if(!data?.ok||!data.base64)return'';
+    return`data:${data.mime||'application/octet-stream'};base64,${data.base64}`;
+  }catch(e){console.warn('fetchCloudImageBase64:',base,e);return''}
+}
+// Contraparte de rehydrateSubmittalImagesFromSidecar pero leyendo desde Apps Script /images
+// en vez de una carpeta local. Usa las mismas banderas (_hasProductImage, etc.) que deja
+// stripPayloadForCloud, y los mismos nombres base (sub_<id>_product, etc.) que sube pushSubmittalImagesToCloud.
+async function rehydrateSubmittalImagesFromCloud(url,data){
+  const subs=data?.stores?.submittals;
+  if(!url||!Array.isArray(subs)||!subs.length)return{rehydrated:0,missing:0};
+  let rehydrated=0,missing=0;
+  for(const row of subs){
+    if(!row||row.id===undefined||row.id===null)continue;
+    if(row._hasProductImage){
+      const d=await fetchCloudImageBase64(url,`sub_${row.id}_product`);
+      if(d){row.productImage=d;rehydrated++}else missing++;
+      delete row._hasProductImage;
+    }
+    if(row._hasDimensionImage){
+      const d=await fetchCloudImageBase64(url,`sub_${row.id}_dimension`);
+      if(d){row.dimensionImage=d;rehydrated++}else missing++;
+      delete row._hasDimensionImage;
+    }
+    if(Array.isArray(row._extraImageMeta)&&!Array.isArray(row.extraImages)){
+      const extras=[];
+      for(let i=0;i<row._extraImageMeta.length;i++){
+        const d=await fetchCloudImageBase64(url,`sub_${row.id}_extra_${i}`);
+        if(d){extras.push({...(row._extraImageMeta[i]||{}),data:d});rehydrated++}else missing++;
+      }
+      row.extraImages=extras;
+      delete row._extraImageMeta;
+    }
+  }
+  return{rehydrated,missing};
+}
 async function pullConfiguredBackup(manual=false,opts={}){
   const cfg=getSyncConfig();if(!cfg.pullUrl){if(manual)toast('Configura primero el link JSON','tdg2');return false}
   const candidates=[cfg.pullUrl,cfg.pushUrl,CLOUD_SYNC_URL].map(x=>String(x||'').trim()).filter(Boolean);
   const urls=[...new Set(candidates)];
-  let data=null,lastErr=null;
+  let data=null,lastErr=null,usedUrl='';
   for(const url of urls){
-    try{data=await fetchCloudBackupData(url);break}
+    try{data=await fetchCloudBackupData(url);usedUrl=url;break}
     catch(e){lastErr=e;console.warn('pull cloud candidate fallo:',url,e)}
   }
   if(!data)throw lastErr||new Error('No pude leer ningun endpoint online');
@@ -14154,6 +14241,12 @@ async function pullConfiguredBackup(manual=false,opts={}){
   if(opts.rejectSeedOnly&&backupLooksEmptyOrSeedOnly(data))throw new Error('La base online esta vacia o solo contiene datos de ejemplo. No se cargara informacion demo.');
   if(!opts.force&&!manual&&remoteStamp&&localStamp&&remoteStamp<=localStamp)return false;
   if(manual&&!confirm('Esto sincronizara los datos del JSON remoto con esta base local. No borra registros locales; los fusiona por fecha para evitar perdida. ¿Continuar?'))return false;
+  if(data?._meta?.imagesAsSidecar&&usedUrl){
+    try{
+      const r=await rehydrateSubmittalImagesFromCloud(usedUrl,data);
+      if(manual&&(r.rehydrated||r.missing))toast(`Imagenes recuperadas de la nube: ${r.rehydrated}${r.missing?` · ${r.missing} no encontradas`:''}`,'tt',5000);
+    }catch(e){console.warn('rehydrateSubmittalImagesFromCloud:',e)}
+  }
   if(manual)await performAutoBackup(false,{localOnly:true,reason:'pre-sync'}).catch(e=>console.warn('pre-sync local backup:',e));
   if(opts.replace){
     await applyBackupData(data,{silent:opts.silent||!manual});
