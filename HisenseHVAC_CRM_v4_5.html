@@ -406,6 +406,16 @@ function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open(DBN,DBV)
 function dReq(s,mode,op,empty){return new Promise((res,rej)=>{let done=false;const fail=err=>{if(done)return;done=true;rej(err instanceof Error?err:new Error(String(err)))};try{if(!db)throw new Error('Base de datos no inicializada');if(!db.objectStoreNames.contains(s))throw new Error('Store IndexedDB no encontrado: '+s+'. Recarga el CRM para ejecutar la migracion.');const tx=db.transaction(s,mode);tx.onerror=()=>fail(tx.error||new Error('Error IndexedDB en '+s));tx.onabort=()=>fail(tx.error||new Error('Transaccion abortada en '+s));const r=op(tx.objectStore(s));r.onsuccess=()=>{if(done)return;done=true;res(r.result===undefined?empty:r.result)};r.onerror=()=>fail(r.error||new Error('Error IndexedDB en '+s));}catch(err){fail(err)}})}
 const dAll=s=>dReq(s,'readonly',st=>st.getAll(),[]);
 const dGet=(s,id)=>dReq(s,'readonly',st=>st.get(id));
+// Recorre un store fila por fila con cursor (cb sincrono). A diferencia de dAll,
+// nunca carga el store completo en memoria: clave para stores con imagenes base64.
+function dEach(s,cb){return new Promise((res,rej)=>{
+  try{
+    if(!db)throw new Error('Base de datos no inicializada');
+    const req=db.transaction(s,'readonly').objectStore(s).openCursor();
+    req.onsuccess=e=>{const c=e.target.result;if(!c){res();return}try{cb(c.value)}catch(err){console.warn('dEach cb:',err)}c.continue()};
+    req.onerror=()=>rej(req.error||new Error('Error cursor IndexedDB en '+s));
+  }catch(err){rej(err)}
+})}
 const STORE_MODULE={
   users:'users',clients:'clients',contacts:'contacts',projects:'projects',products:'products',quotes:'quotes',
   dispatches:'dispatch',inventory:'inventory',movements:'inventory',reservations:'inventory',arrivals:'inventory',
@@ -554,11 +564,6 @@ function showApp(opts={}){
   buildNav();loadTRM();render();
   startProjectReminderMonitor();
   setTimeout(()=>autoPullConfiguredBackup().catch(e=>console.warn('auto cloud sync:',e)),2500);
-  // Revisa la nube cada cierto tiempo mientras la app esta abierta, para que los cambios
-  // hechos en otro dispositivo (ej. un usuario nuevo) lleguen sin tener que recargar o
-  // sincronizar a mano. No es tiempo real, pero acorta el retraso a minutos.
-  if(autoPullIntervalId)clearInterval(autoPullIntervalId);
-  autoPullIntervalId=setInterval(()=>autoPullConfiguredBackup().catch(e=>console.warn('auto cloud sync interval:',e)),AUTO_PULL_INTERVAL_MS);
   setTimeout(()=>addChatMsg('bot',`¡Hola ${CU.name.split(' ')[0]}! 👋 Soy tu asistente Hisense. Puedes preguntarme cómo usar cualquier módulo del CRM.`),1200);
   // Escuchar guardados de cotizaciones desde otras pestañas
   window.addEventListener('storage',e=>{
@@ -567,7 +572,7 @@ function showApp(opts={}){
     }
   });
 }
-function doLogout(){try{sessionStorage.removeItem('crm_user');}catch(e){}trustedDeviceClear();CU=null;if(autoPullIntervalId){clearInterval(autoPullIntervalId);autoPullIntervalId=null}document.getElementById('loginScreen').classList.add('active');document.getElementById('mainApp').style.display='none'}
+function doLogout(){try{sessionStorage.removeItem('crm_user');}catch(e){}trustedDeviceClear();CU=null;document.getElementById('loginScreen').classList.add('active');document.getElementById('mainApp').style.display='none'}
 function canDo(v){return canView(v)}
 function requireEdit(v=V.view){if(canEdit(v))return true;toast('Permiso solo visualizacion','tdg2');return false}
 
@@ -13114,19 +13119,20 @@ async function rSettings(){
       <div class="field"><label>Nombre de este dispositivo</label><input type="text" id="syncDevice" value="${escH(getSyncConfig().deviceName)}" placeholder="PC Oficina, Portatil, Tablet, etc."></div>
       <div class="hr"></div>
       <div class="stitle">Nube directa Google / Apps Script</div>
-      <p class="muted" style="font-size:12px;margin-bottom:8px">Google Apps Script queda activo para backups y lectura entre equipos. La base ahora es compatible con campos nuevos de proyectos y submittals antes de enviar o restaurar.</p>
+      <p class="muted" style="font-size:12px;margin-bottom:8px">Google Apps Script queda activo para backups y lectura entre equipos. La base ahora es compatible con campos nuevos de proyectos y submittals antes de enviar o restaurar. · Build <code>${CRM_BUILD}</code></p>
       <div class="field"><label>URL Apps Script /exec</label><input type="text" id="syncCloudUrl" value="${escH(syncCfg.pushUrl)}" placeholder="https://script.google.com/macros/s/.../exec"></div>
       <div class="field"><label>URL lectura JSON <span class="muted">(opcional; si la dejas vacia usa la misma)</span></label><input type="text" id="syncPullUrl" value="${escH(syncCfg.pullUrl)}" placeholder="https://script.google.com/macros/s/.../exec"></div>
       <label class="field" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="syncAutoPull" ${syncCfg.autoPull?'checked':''} style="width:auto"> Sincronizar desde nube al abrir si hay URL de lectura</label>
       <div class="flex gap12 fw">
         <button class="btn bp" onclick="saveSyncConfig()">Guardar y probar backup</button>
         <button class="btn bs" onclick="pullFromAppsScriptNow()">📥 Sincronizar ahora (Apps Script)</button>
+        <button class="btn bs" onclick="recoverCloudImagesNow()">🖼️ Recuperar imagenes desde la nube</button>
         <button class="btn bs" onclick="diagnoseCloudBackup()">Diagnostico nube</button>
         <button class="btn bs" onclick="copyGoogleBackupScript()">Copiar script Google Drive</button>
         <button class="btn bs" onclick="downloadWebApp()">Descargar app web</button>
       </div>
       <div class="hr"></div>
-      <p style="font-size:12px;color:var(--muted)"><strong>Hisense HVAC Colombia CRM v2.0 · by JL</strong><br>Sistema comercial completo: Pipeline Kanban · Cotizaciones PDF/Excel · Inventario con reservas · Despachos Excel · Forecast/Backlog · Facturación · Servicio · Usuarios y roles · Chatbot · TRM ajustable · Importación/Exportación Excel total.</p>
+      <p style="font-size:12px;color:var(--muted)"><strong>Hisense HVAC Colombia CRM v2.0 · by JL · Build ${CRM_BUILD}</strong><br>Sistema comercial completo: Pipeline Kanban · Cotizaciones PDF/Excel · Inventario con reservas · Despachos Excel · Forecast/Backlog · Facturación · Servicio · Usuarios y roles · Chatbot · TRM ajustable · Importación/Exportación Excel total.</p>
     </div></div>`;
 }
 
@@ -13218,8 +13224,10 @@ function scheduleAutoBackup(store='',action=''){
   backupTimer=setTimeout(()=>{backupTimer=null;backupTimerAt=0;performAutoBackup(false,{reason:`${store}:${action}`}).catch(e=>console.warn('auto backup:',e))},delay);
 }
 const CLOUD_SYNC_ENABLED = true;
-let autoPullIntervalId=null;
-const AUTO_PULL_INTERVAL_MS=90*1000;
+// Marcador de build visible en Ajustes y consola, para verificar que GitHub Pages
+// este sirviendo la version correcta del archivo (los deploys pueden fallar o tardar).
+const CRM_BUILD='2026-07-05a';
+console.info('Hisense CRM build',CRM_BUILD);
 const CLOUD_SYNC_URL = ['https://script.google.com/macros/s/','AKfycbybACrYB0hf197GP3MeMTin3zSWN6fCnF1YCgy1moD6P37FnTAuYrjx-5BaKsfLyGhZ','/exec'].join('');
 
 function getSyncConfig(){
@@ -13628,8 +13636,21 @@ async function uploadImageToCloud(url,filename,mime,base64){
     return true;
   }catch(e){console.warn('uploadImageToCloud:',filename,e);return false}
 }
+// Nombre seguro de SKU/modelo para usar dentro de nombres de archivo en Drive.
+function safeSkuForFile(sku){return String(sku||'').trim().replace(/[^A-Za-z0-9._-]/g,'_').slice(0,40)}
+// Busca en el listado de la nube el archivo que corresponde a un nombre base
+// (sub_<id>_product, etc.). Acepta el formato viejo (base.ext) y el nuevo con
+// modelo (base__SKU.ext); prefiere el nuevo si existen ambos.
+function findCloudImageKey(map,base){
+  if(!map)return'';
+  const ks=Object.keys(map).filter(k=>k.startsWith(base+'.')||k.startsWith(base+'__'));
+  if(!ks.length)return'';
+  ks.sort((a,b)=>(b.includes('__')?1:0)-(a.includes('__')?1:0));
+  return ks[0];
+}
 // Las imagenes de submittals se suben una por una a /images en Drive (accion uploadImage),
 // separado del JSON principal para no romper el limite de tamano del POST a Apps Script.
+// El nombre incluye la seccion (product/dimension/extra_N) y el modelo: sub_<id>_<seccion>__<SKU>.<ext>
 async function pushSubmittalImagesToCloud(url,payload,manual=false){
   const subs=payload?.stores?.submittals;
   if(!url||!Array.isArray(subs)||!subs.length)return{uploaded:0,skipped:0,errors:0};
@@ -13637,13 +13658,15 @@ async function pushSubmittalImagesToCloud(url,payload,manual=false){
   const existing=await fetchCloudImageList(url)||{};
   let uploaded=0,skipped=0,errors=0;
   for(const row of subs){
+    const sk=safeSkuForFile(row?.sku);
     for(const entry of submittalImageEntries(row)){
       const m=/^data:([^;]+);base64,(.*)$/.exec(entry.data||'');
       if(!m)continue;
       const mime=m[1],base64=m[2];
-      const filename=`${entry.base}.${imageExtFromMime(mime)}`;
+      const filename=`${entry.base}${sk?'__'+sk:''}.${imageExtFromMime(mime)}`;
       const expectedSize=Math.floor(base64.length*3/4);
-      if(existing[filename]!==undefined&&Math.abs(existing[filename]-expectedSize)<64){skipped++;continue}
+      const match=findCloudImageKey(existing,entry.base);
+      if(match&&Math.abs((existing[match]||0)-expectedSize)<64){skipped++;continue}
       const ok=await uploadImageToCloud(url,filename,mime,base64);
       if(ok)uploaded++;else errors++;
     }
@@ -13924,10 +13947,32 @@ async function performAutoBackup(manual=false,opts={}){
 }
 function runAutoBackupNow(){performAutoBackup(true).catch(err=>toast('Backup no disponible: '+err.message,'tdg2',6000))}
 async function exportBackup(){
-  const all=await buildBackupPayload(true);// Full export always includes images
-  // Sin indent: con 100MB+ de imagenes embebidas, JSON.stringify con indent=2 duplica la memoria y tira la pestana.
-  const blob=new Blob([JSON.stringify(all,safeJsonReplacer)],{type:'application/json'});
-  const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`HisenseHVAC_CRM_Backup_${today()}.json`;a.click();URL.revokeObjectURL(url);toast('Backup descargado','tok2');
+  // Export completo con imagenes, armado por partes: cada fila se serializa por separado
+  // con un cursor (dEach) y el Blob se construye de fragmentos. Nunca existe un unico
+  // string gigante de 100MB+ ni un stringify del documento completo: eso era lo que
+  // producia el crash "Out of Memory" de la pestana con bases grandes.
+  toast('Preparando exportacion... puede tardar con muchas imagenes','tt',5000);
+  const cfg=getSyncConfig();
+  const meta={app:'Hisense HVAC Colombia CRM',db:DBN,version:DBV,updatedAt:Date.now(),date:new Date().toISOString(),deviceId:cfg.deviceId,deviceName:cfg.deviceName,user:CU?.email||CU?.name||'',includesImages:true};
+  const parts=['{"_meta":'+JSON.stringify(meta)+',"stores":{'];
+  try{
+    let firstStore=true;
+    for(const s of STORES){
+      parts.push((firstStore?'':',')+JSON.stringify(s)+':[');
+      firstStore=false;
+      let firstRow=true;
+      await dEach(s,row=>{
+        const j=JSON.stringify(row,safeJsonReplacer);
+        if(j!==undefined){parts.push((firstRow?'':',')+j);firstRow=false;}
+      });
+      parts.push(']');
+    }
+    parts.push('}}');
+  }catch(e){toast('Error exportando: '+e.message,'tdg2',8000);return}
+  const blob=new Blob(parts,{type:'application/json'});
+  parts.length=0;
+  const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`HisenseHVAC_CRM_Backup_${today()}.json`;a.click();URL.revokeObjectURL(url);
+  toast(`Backup descargado (${(blob.size/1024/1024).toFixed(1)}MB)`,'tok2',6000);
 }
 // ── OPTIMIZACION DE IMAGENES (migracion uno-a-uno) ────
 // Recorre todos los submittals y recomprime las imagenes guardadas que excedan el umbral.
@@ -14212,43 +14257,125 @@ function backupLooksEmptyOrSeedOnly(data){
   const projectsOk=projects.length<=2&&projects.every(p=>demoProjects.has(normSearch(p.name||''))&&(p.createdBy==='Sistema'||!p.createdBy));
   return clientsOk&&projectsOk;
 }
-async function fetchCloudImageBase64(url,base){
+async function fetchCloudImageBase64(url,base,filename=''){
   try{
-    const data=await cloudJsonp(url,{action:'getImage',base},10000);
+    // Con filename exacto (tomado de listImages) el servidor no tiene que adivinar
+    // extensiones; base queda como fallback para archivos con nombres viejos.
+    const params=filename?{action:'getImage',filename}:{action:'getImage',base};
+    const data=await cloudJsonp(url,params,20000);
     if(!data?.ok||!data.base64)return'';
     return`data:${data.mime||'application/octet-stream'};base64,${data.base64}`;
-  }catch(e){console.warn('fetchCloudImageBase64:',base,e);return''}
+  }catch(e){console.warn('fetchCloudImageBase64:',filename||base,e);return''}
 }
 // Contraparte de rehydrateSubmittalImagesFromSidecar pero leyendo desde Apps Script /images
 // en vez de una carpeta local. Usa las mismas banderas (_hasProductImage, etc.) que deja
-// stripPayloadForCloud, y los mismos nombres base (sub_<id>_product, etc.) que sube pushSubmittalImagesToCloud.
+// stripPayloadForCloud. Antes de descargar de la nube, copia la imagen desde la fila local
+// si ya existe (mismo id): mas rapido y sin gastar red.
 async function rehydrateSubmittalImagesFromCloud(url,data){
   const subs=data?.stores?.submittals;
-  if(!url||!Array.isArray(subs)||!subs.length)return{rehydrated:0,missing:0};
-  let rehydrated=0,missing=0;
+  if(!url||!Array.isArray(subs)||!subs.length)return{rehydrated:0,missing:0,fromLocal:0};
+  let rehydrated=0,missing=0,fromLocal=0;
+  const list=await fetchCloudImageList(url);
+  const pick=base=>findCloudImageKey(list,base);
   for(const row of subs){
     if(!row||row.id===undefined||row.id===null)continue;
+    const local=await dGet('submittals',row.id).catch(()=>null);
     if(row._hasProductImage){
-      const d=await fetchCloudImageBase64(url,`sub_${row.id}_product`);
-      if(d){row.productImage=d;rehydrated++}else missing++;
+      let d=local?.productImage||'';
+      if(d)fromLocal++;
+      else{d=await fetchCloudImageBase64(url,`sub_${row.id}_product`,pick(`sub_${row.id}_product`));d?rehydrated++:missing++}
+      if(d)row.productImage=d;
       delete row._hasProductImage;
     }
     if(row._hasDimensionImage){
-      const d=await fetchCloudImageBase64(url,`sub_${row.id}_dimension`);
-      if(d){row.dimensionImage=d;rehydrated++}else missing++;
+      let d=local?.dimensionImage||'';
+      if(d)fromLocal++;
+      else{d=await fetchCloudImageBase64(url,`sub_${row.id}_dimension`,pick(`sub_${row.id}_dimension`));d?rehydrated++:missing++}
+      if(d)row.dimensionImage=d;
       delete row._hasDimensionImage;
     }
     if(Array.isArray(row._extraImageMeta)&&!Array.isArray(row.extraImages)){
-      const extras=[];
-      for(let i=0;i<row._extraImageMeta.length;i++){
-        const d=await fetchCloudImageBase64(url,`sub_${row.id}_extra_${i}`);
-        if(d){extras.push({...(row._extraImageMeta[i]||{}),data:d});rehydrated++}else missing++;
+      const localExtras=subExtraImagesList(local||{});
+      if(localExtras.length){row.extraImages=localExtras;fromLocal+=localExtras.length}
+      else{
+        const extras=[];
+        for(let i=0;i<row._extraImageMeta.length;i++){
+          const d=await fetchCloudImageBase64(url,`sub_${row.id}_extra_${i}`,pick(`sub_${row.id}_extra_${i}`));
+          if(d){extras.push({...(row._extraImageMeta[i]||{}),data:d});rehydrated++}else missing++;
+        }
+        row.extraImages=extras;
       }
-      row.extraImages=extras;
       delete row._extraImageMeta;
     }
   }
-  return{rehydrated,missing};
+  return{rehydrated,missing,fromLocal};
+}
+// Recuperacion basada en la base LOCAL: revisa que fichas locales tienen imagenes
+// faltantes, y las baja una por una desde Drive guardando fila por fila (dPut inmediato).
+// No depende de banderas ni del JSON remoto, asi que sirve aunque la fila local sea mas
+// nueva que la nube (caso en que mergeBackupData descarta las filas remotas rehidratadas).
+// Memoria: la lista de trabajo solo guarda ids, y cada imagen vive en memoria solo
+// mientras se descarga y persiste su fila.
+async function recoverCloudImagesFromCloud(url,{silent=true}={}){
+  const out={recovered:0,rows:0,missing:0,total:0};
+  if(!url)return out;
+  const list=await fetchCloudImageList(url);
+  if(!list||!Object.keys(list).length)return out;
+  const keys=Object.keys(list);
+  const work=[];
+  await dEach('submittals',r=>{
+    if(!r||r.id===undefined||r.id===null)return;
+    const jobs=[];
+    if(!r.productImage&&findCloudImageKey(list,`sub_${r.id}_product`))jobs.push('product');
+    if(!r.dimensionImage&&findCloudImageKey(list,`sub_${r.id}_dimension`))jobs.push('dimension');
+    if(!subExtraImagesList(r).length&&keys.some(k=>k.startsWith(`sub_${r.id}_extra_`)))jobs.push('extras');
+    if(jobs.length)work.push({id:r.id,jobs});
+  });
+  out.total=work.length;
+  if(!work.length)return out;
+  let done=0;
+  for(const w of work){
+    const row=await dGet('submittals',w.id).catch(()=>null);
+    if(!row)continue;
+    let changed=false;
+    for(const j of w.jobs){
+      if(j==='extras'){
+        const metas=Array.isArray(row._extraImageMeta)?row._extraImageMeta:null;
+        const extraKeys=keys.filter(k=>k.startsWith(`sub_${w.id}_extra_`))
+          .sort((a,b)=>(parseInt(/_extra_(\d+)/.exec(a)?.[1]||'0')-parseInt(/_extra_(\d+)/.exec(b)?.[1]||'0')));
+        const extras=[];
+        for(let i=0;i<extraKeys.length;i++){
+          const d=await fetchCloudImageBase64(url,'',extraKeys[i]);
+          if(d)extras.push({title:metas?.[i]?.title||'',data:d});else out.missing++;
+        }
+        if(extras.length){row.extraImages=extras;delete row._extraImageMeta;delete row._hasExtraImages;changed=true;out.recovered+=extras.length}
+      }else{
+        const key=findCloudImageKey(list,`sub_${w.id}_${j}`);
+        const d=key?await fetchCloudImageBase64(url,'',key):'';
+        if(d){
+          row[j==='product'?'productImage':'dimensionImage']=d;
+          delete row[j==='product'?'_hasProductImage':'_hasDimensionImage'];
+          changed=true;out.recovered++;
+        }else out.missing++;
+      }
+    }
+    if(changed){await dPut('submittals',row);out.rows++}
+    done++;
+    if(!silent&&work.length>3&&done%5===0)toast(`Recuperando imagenes... ${done}/${work.length} fichas`,'tt',2500);
+  }
+  return out;
+}
+async function recoverCloudImagesNow(){
+  const cfg=getSyncConfig();
+  const url=(cfg.pullUrl||cfg.pushUrl||'').trim();
+  if(!url){toast('Configura primero la URL de Apps Script','tdg2');return}
+  toast('Buscando imagenes en la nube...','tt',4000);
+  try{
+    const r=await recoverCloudImagesFromCloud(url,{silent:false});
+    if(!r.total&&!r.recovered)toast('Todas las fichas ya tienen sus imagenes (o la nube no tiene imagenes guardadas)','tok2',7000);
+    else toast(`Imagenes: ${r.recovered} recuperadas en ${r.rows} ficha(s)${r.missing?` · ${r.missing} no encontradas`:''}`,r.recovered||!r.missing?'tok2':'tw3',8000);
+    if(r.rows)render();
+  }catch(e){toast('Recuperar imagenes: '+e.message,'tdg2',8000)}
 }
 async function pullConfiguredBackup(manual=false,opts={}){
   const cfg=getSyncConfig();if(!cfg.pullUrl){if(manual)toast('Configura primero el link JSON','tdg2');return false}
@@ -14263,21 +14390,31 @@ async function pullConfiguredBackup(manual=false,opts={}){
   const remoteStamp=backupStamp(data),localStamp=parseInt(localStorage.getItem('crmLastWriteAt')||'0')||0;
   if(opts.rejectSeedOnly&&backupLooksEmptyOrSeedOnly(data))throw new Error('La base online esta vacia o solo contiene datos de ejemplo. No se cargara informacion demo.');
   if(!opts.force&&!manual&&remoteStamp&&localStamp&&remoteStamp<=localStamp)return false;
-  if(manual&&!confirm('Esto sincronizara los datos del JSON remoto con esta base local. No borra registros locales; los fusiona por fecha para evitar perdida. ¿Continuar?'))return false;
-  if(data?._meta?.imagesAsSidecar&&usedUrl){
-    try{
-      const r=await rehydrateSubmittalImagesFromCloud(usedUrl,data);
-      if(manual&&(r.rehydrated||r.missing))toast(`Imagenes recuperadas de la nube: ${r.rehydrated}${r.missing?` · ${r.missing} no encontradas`:''}`,'tt',5000);
-    }catch(e){console.warn('rehydrateSubmittalImagesFromCloud:',e)}
-  }
+  if(manual&&!opts.skipConfirm&&!confirm('Esto sincronizara los datos del JSON remoto con esta base local. No borra registros locales; los fusiona por fecha para evitar perdida. ¿Continuar?'))return false;
   if(manual)await performAutoBackup(false,{localOnly:true,reason:'pre-sync'}).catch(e=>console.warn('pre-sync local backup:',e));
   if(opts.replace){
+    // Restauracion completa: las filas remotas van directo a la base local, asi que hay
+    // que rehidratar sus imagenes ANTES de aplicar (copiando de local o bajando de Drive).
+    if(data?._meta?.imagesAsSidecar&&usedUrl){
+      try{
+        const r=await rehydrateSubmittalImagesFromCloud(usedUrl,data);
+        if(manual&&(r.rehydrated||r.missing))toast(`Imagenes recuperadas de la nube: ${r.rehydrated}${r.missing?` · ${r.missing} no encontradas`:''}`,r.rehydrated||!r.missing?'tt':'tw3',6000);
+      }catch(e){console.warn('rehydrateSubmittalImagesFromCloud:',e);if(manual)toast('Error recuperando imagenes: '+e.message,'tdg2',7000)}
+    }
     await applyBackupData(data,{silent:opts.silent||!manual});
     if(!opts.silent&&manual)toast('Datos restaurados desde Google Drive','tok2',5000);
     if(opts.renderAfter!==false)render();
     return true;
   }
   const result=await mergeBackupData(data,{silent:!manual});
+  // Fusion: las filas remotas pueden descartarse si la local es mas nueva, asi que la
+  // recuperacion de imagenes se hace sobre la base LOCAL despues del merge.
+  if(usedUrl){
+    try{
+      const r=await recoverCloudImagesFromCloud(usedUrl,{silent:!manual});
+      if(manual&&(r.recovered||r.missing))toast(`Imagenes recuperadas de la nube: ${r.recovered} en ${r.rows} ficha(s)${r.missing?` · ${r.missing} no encontradas`:''}`,r.recovered||!r.missing?'tok2':'tw3',7000);
+    }catch(e){console.warn('recoverCloudImagesFromCloud:',e);if(manual)toast('Error recuperando imagenes: '+e.message,'tdg2',7000)}
+  }
   if(manual)toast(`Sincronizacion lista · ${result.added} nuevos · ${result.updated} actualizados`,'tok2',5000);else if(result.changed)toast('Datos sincronizados desde Google Drive','tok2',4000);
   if(opts.renderAfter!==false)render();return true;
 }
@@ -14438,7 +14575,7 @@ async function pullFromAppsScriptNow(){
   const cfg=getSyncConfig();
   if(!cfg.pullUrl){toast('Configura primero la URL de Apps Script','tdg2');return}
   try{
-    const ok=await pullConfiguredBackup(true,{force:true});
+    const ok=await pullConfiguredBackup(true,{force:true,skipConfirm:true});
     if(!ok)toast('Nada nuevo que traer de Apps Script','tt',4000);
   }catch(e){toast('Sincronizar Apps Script: '+e.message,'tdg2',7000)}
 }
