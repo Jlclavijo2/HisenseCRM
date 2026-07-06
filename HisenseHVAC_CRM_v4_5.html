@@ -2017,8 +2017,18 @@ function closeModalSafe(){
   }
   closeModal();
 }
-// Clic en el fondo del modal: pide confirmación si hay cotización abierta
-document.getElementById('modalBg').addEventListener('click',e=>{if(e.target.id==='modalBg'){if(e.currentTarget.dataset.lockClose==='1'){toast('Usa Cancelar, Crear/Actualizar o la X para cerrar este modal','tw3',2200);return}closeModalSafe()}});
+// Clic en el fondo del modal: SIEMPRE pide confirmación antes de cerrar, en todas las
+// pantallas. Un clic accidental afuera no debe botar lo que el usuario tenga a medias.
+// Los botones X / Cancelar siguen funcionando igual que siempre.
+document.getElementById('modalBg').addEventListener('click',e=>{
+  if(e.target.id!=='modalBg')return;
+  if(e.currentTarget.dataset.lockClose==='1'){toast('Usa Cancelar, Crear/Actualizar o la X para cerrar este modal','tw3',2200);return}
+  const msg=document.getElementById('qnum')
+    ?'¿Cerrar la cotización?\n\nLos cambios sin guardar se perderán.'
+    :'¿Cerrar esta ventana?\n\nLos cambios sin guardar se perderán.';
+  if(!confirm(msg))return;
+  closeModal();
+});
 document.addEventListener('keydown',e=>{const bg=document.getElementById('modalBg');if(e.key==='Escape'&&bg?.classList.contains('active')&&bg.dataset.lockClose==='1'){e.preventDefault();toast('Usa un boton de cierre para salir de este modal','tw3',2200);}});
 
 function tableSortValue(td){
@@ -5792,7 +5802,8 @@ function showSubModal(title,body,footer){
     bg.style.zIndex='2000';
     bg.innerHTML='<div class="modal" style="max-width:560px"><div class="mhead"><h3 id="subModalTitle"></h3><button class="mclose" onclick="closeSubModal()">×</button></div><div class="mbody" id="subModalBody"></div><div class="mfoot" id="subModalFoot"></div></div>';
     document.body.appendChild(bg);
-    bg.addEventListener('click',e=>{if(e.target.id==='subModalBg')closeSubModal()});
+    // Igual que el modal principal: clic afuera pide confirmación, nunca cierra solo.
+    bg.addEventListener('click',e=>{if(e.target.id==='subModalBg'){if(confirm('¿Cerrar esta ventana?\n\nLos cambios sin guardar se perderán.'))closeSubModal()}});
   }
   document.getElementById('subModalTitle').textContent=title;
   document.getElementById('subModalBody').innerHTML=body;
